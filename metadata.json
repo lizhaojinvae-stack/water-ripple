@@ -1,0 +1,6 @@
+{
+  "name": "Water Ripple Camera",
+  "description": "Real-time WebGL water ripple shader with camera background and MediaPipe hands interaction.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

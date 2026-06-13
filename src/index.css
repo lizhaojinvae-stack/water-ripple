@@ -1,0 +1,7 @@
+@import "tailwindcss";
+
+@theme {
+  --animate-spin-slow: spin 3s linear infinite;
+  --animate-bounce-slow: bounce 1.8s infinite;
+  --animate-ping-slow: ping 3.2s cubic-bezier(0, 0, 0.2, 1) infinite;
+}
