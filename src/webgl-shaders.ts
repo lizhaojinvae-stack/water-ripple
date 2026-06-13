@@ -103,10 +103,14 @@ export const RENDERING_FRAGMENT_SHADER = `
   varying vec2 v_uv;
   
   uniform sampler2D u_camera_tex;
+  uniform sampler2D u_bg_tex;
   uniform sampler2D u_water_tex;
   uniform vec2 u_texel_size;
   uniform float u_aspect;
   uniform float u_is_front; // 1.0 if front camera reflection active, 0.0 otherwise
+  uniform float u_camera_mix; // 0.0 = only background, 1.0 = only camera, in-between splits/blends them
+  uniform float u_bg_mix; // 0.0 = dark background, 1.0 = full background image strength
+  uniform float u_blend_mode; // 0.0 = Alpha Mix, 1.0 = Screen, 2.0 = Multiply, 3.0 = Soft Light
   
   void main() {
     float height = texture2D(u_water_tex, v_uv).r;
@@ -153,12 +157,42 @@ export const RENDERING_FRAGMENT_SHADER = `
     vec2 uv_g = clamp(base_uv + offset_g, 0.001, 0.999);
     vec2 uv_b = clamp(base_uv + offset_b, 0.001, 0.999);
     
-    // Sample RGB chromatic dispersion
-    vec3 base_col = vec3(
+    // Sample RGB chromatic dispersion for live camera feed
+    vec3 col_camera = vec3(
       texture2D(u_camera_tex, uv_r).r,
       texture2D(u_camera_tex, uv_g).g,
       texture2D(u_camera_tex, uv_b).b
     );
+    
+    // Sample RGB chromatic dispersion for clean static/preset background
+    vec3 col_bg = vec3(
+      texture2D(u_bg_tex, uv_r).r,
+      texture2D(u_bg_tex, uv_g).g,
+      texture2D(u_bg_tex, uv_b).b
+    );
+    
+    // Apply independent controllable depths/strengths
+    vec3 adjusted_bg = col_bg * u_bg_mix;
+    vec3 adjusted_cam = col_camera * u_camera_mix;
+    
+    // Smoothly blend/mode-combine the webcam feed with the background image
+    vec3 base_col = adjusted_bg;
+    if (u_blend_mode < 0.5) {
+      // 0.0: Alpha Mix (经典融合)
+      base_col = mix(adjusted_bg, adjusted_cam, u_camera_mix);
+    } else if (u_blend_mode < 1.5) {
+      // 1.0: Screen / 滤色 (双重曝光) - Beautiful glowing blend for coexisting view
+      vec3 screen_col = vec3(1.0) - (vec3(1.0) - adjusted_bg) * (vec3(1.0) - adjusted_cam);
+      base_col = screen_col;
+    } else if (u_blend_mode < 2.5) {
+      // 2.0: Multiply / 正片叠底
+      vec3 mult_col = adjusted_bg * (adjusted_cam + vec3(0.15));
+      base_col = mult_col;
+    } else {
+      // 3.0: Soft Light / 柔光
+      vec3 soft_col = (vec3(1.0) - vec3(2.0) * adjusted_cam) * adjusted_bg * adjusted_bg + vec3(2.0) * adjusted_cam * adjusted_bg;
+      base_col = soft_col;
+    }
     
     // Wave Depth shading (Neutral colorless shading: Crests of waves bright, Troughs dark)
     float height_blend = clamp(height * 0.75 + 0.5, 0.0, 1.0);

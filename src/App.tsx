@@ -12,6 +12,9 @@ import CameraSelector from './components/CameraSelector';
 import ShaderErrorDisplay from './components/ShaderErrorDisplay';
 import AudioPanel from './components/AudioPanel';
 
+// High-quality, professional dark abstract backgrounds optimized for glass liquid refraction shading
+export const DEFAULT_BACKGROUND_URL = 'https://images.unsplash.com/photo-1506318137071-a8e063b4bec0?q=80&w=1280&auto=format&fit=crop';
+
 export default function App() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -32,12 +35,27 @@ export default function App() {
   const [ripplePersistence, setRipplePersistence] = useState<number>(0.85); // Default 0.85 (balanced organic duration)
   const [onlyHands, setOnlyHands] = useState<boolean>(false); // Strict gesture tracking fallback gate
   const [paramsExpanded, setParamsExpanded] = useState<boolean>(true); // Expanded by default for visibility
+  
+  // Background selection custom state (solving "too bright, give screen a background image")
+  const [bgType, setBgType] = useState<string>('default'); 
+  const [customBgUrl, setCustomBgUrl] = useState<string | null>(null);
+  const [bgMix, setBgMix] = useState<number>(0.7); // Default 70% background strength/depth
+  const bgMixRef = useRef<number>(0.7);
+  const [cameraMix, setCameraMix] = useState<number>(0.5); // Default 50% for vibrant camera presence coexisting with background preset
+  const cameraMixRef = useRef<number>(0.5);
+  const [blendMode, setBlendMode] = useState<number>(1); // Default to 1 (Screen/Double Exposure) for beautiful coexisting glow effect!
+  const blendModeRef = useRef<number>(1);
 
   // Water parameters refs (read with high-performance inside WebGL loop)
   const rippleRadiusRef = useRef<number>(0.026);
   const rippleStrengthRef = useRef<number>(0.12);
   const ripplePersistenceRef = useRef<number>(0.85);
   const onlyHandsRef = useRef<boolean>(false);
+
+  // Background refs to synchronize with WebGL loop
+  const bgTypeRef = useRef<string>('default');
+  const activeBgImageRef = useRef<HTMLImageElement | null>(null);
+  const textureNeedsUploadRef = useRef<boolean>(false);
 
   // Error panel states
   const [shaderError, setShaderError] = useState<string | null>(null);
@@ -51,6 +69,7 @@ export default function App() {
   const renderProgramRef = useRef<WebGLProgram | null>(null);
   const pingPongRef = useRef<PingPongTarget | null>(null);
   const cameraTexRef = useRef<WebGLTexture | null>(null);
+  const bgTexRef = useRef<WebGLTexture | null>(null);
 
   // Decoupled target references to gather input asynchronously
   const handTargetsRef = useRef<{ x: number; y: number; active: boolean }[]>(
@@ -161,6 +180,20 @@ export default function App() {
       }
     };
   }, []);
+
+  // BACKGROUND IMAGE LOADING LOADER
+  useEffect(() => {
+    bgTypeRef.current = bgType;
+    const src = bgType === 'custom' && customBgUrl ? customBgUrl : DEFAULT_BACKGROUND_URL;
+
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    img.src = src;
+    img.onload = () => {
+      activeBgImageRef.current = img;
+      textureNeedsUploadRef.current = true;
+    };
+  }, [bgType, customBgUrl]);
 
   // PROCESS MEDIAPIPE RESULTS & MAP TO FINGER UNIFORM SLOTS
   const processHandResults = (results: any) => {
@@ -330,11 +363,24 @@ export default function App() {
     // Create persistent camera feed texture context
     const camTex = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, camTex);
+    // Initialize with a 1x1 temporary dark grey solid texture to avoid uninitialized read warnings
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([20, 20, 25, 255]));
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     cameraTexRef.current = camTex;
+
+    // Create persistent background preset texture context
+    const bgTex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, bgTex);
+    // Initialize with a 1x1 temporary dark teal/nebula grey solid texture
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([10, 15, 20, 255]));
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    bgTexRef.current = bgTex;
 
     // Bind viewport dimensions dynamically on screen layout shifts
     const handleResize = () => {
@@ -344,6 +390,8 @@ export default function App() {
       const height = window.innerHeight;
       canvas.width = width;
       canvas.height = height;
+
+
 
       const currentAspect = width / height;
       const nextSimW = 512;
@@ -365,6 +413,7 @@ export default function App() {
         if (simProgramRef.current) g.deleteProgram(simProgramRef.current);
         if (renderProgramRef.current) g.deleteProgram(renderProgramRef.current);
         if (cameraTexRef.current) g.deleteTexture(cameraTexRef.current);
+        if (bgTexRef.current) g.deleteTexture(bgTexRef.current);
       }
       if (pingPongRef.current) pingPongRef.current.destroy();
     };
@@ -557,11 +606,20 @@ export default function App() {
       gl.bindFramebuffer(gl.FRAMEBUFFER, null); // Render in main system canvas buffer
       gl.viewport(0, 0, viewWidth, viewHeight);
 
-      // Update background camera feed texture if frame is ready
+      // 1. Update Camera background feed texture if active/ready (always keep camTex updated if camera active)
       if (video && video.readyState === video.HAVE_ENOUGH_DATA) {
         gl.bindTexture(gl.TEXTURE_2D, camTex);
         gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
         gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
+      }
+
+      // 2. Update Background presets texture on demand
+      const bgTex = bgTexRef.current;
+      if (bgTex && activeBgImageRef.current && textureNeedsUploadRef.current) {
+        gl.bindTexture(gl.TEXTURE_2D, bgTex);
+        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, activeBgImageRef.current);
+        textureNeedsUploadRef.current = false;
       }
 
       gl.useProgram(rendProg);
@@ -582,10 +640,20 @@ export default function App() {
       gl.bindTexture(gl.TEXTURE_2D, pp.read.texture);
       gl.uniform1i(gl.getUniformLocation(rendProg, 'u_water_tex'), 1);
 
+      // Texture 2: Background image preset / custom image
+      if (bgTex) {
+        gl.activeTexture(gl.TEXTURE2);
+        gl.bindTexture(gl.TEXTURE_2D, bgTex);
+        gl.uniform1i(gl.getUniformLocation(rendProg, 'u_bg_tex'), 2);
+      }
+
       // Map rendering presentation uniforms
       gl.uniform2f(gl.getUniformLocation(rendProg, 'u_texel_size'), texelX, texelY);
       gl.uniform1f(gl.getUniformLocation(rendProg, 'u_aspect'), aspect);
       gl.uniform1f(gl.getUniformLocation(rendProg, 'u_is_front'), facingMode === 'user' ? 1.0 : 0.0);
+      gl.uniform1f(gl.getUniformLocation(rendProg, 'u_camera_mix'), cameraActive ? cameraMixRef.current : 0.0);
+      gl.uniform1f(gl.getUniformLocation(rendProg, 'u_bg_mix'), bgMixRef.current);
+      gl.uniform1f(gl.getUniformLocation(rendProg, 'u_blend_mode'), blendModeRef.current);
 
       // Commit screen-space present render
       gl.drawArrays(gl.TRIANGLES, 0, 6);
@@ -646,6 +714,21 @@ export default function App() {
   const handlePersistenceChange = (val: number) => {
     setRipplePersistence(val);
     ripplePersistenceRef.current = val;
+  };
+
+  const handleCameraMixChange = (val: number) => {
+    setCameraMix(val);
+    cameraMixRef.current = val;
+  };
+
+  const handleBgMixChange = (val: number) => {
+    setBgMix(val);
+    bgMixRef.current = val;
+  };
+
+  const handleBlendModeChange = (val: number) => {
+    setBlendMode(val);
+    blendModeRef.current = val;
   };
 
   const handleOnlyHandsChange = (val: boolean) => {
@@ -780,8 +863,131 @@ export default function App() {
                 />
               </div>
 
+              {/* 🖼️ Premium Eye-Safe Background Preset & Custom Switcher */}
+              <div className="flex flex-col gap-2 pt-2 border-t border-zinc-900/60">
+                <div className="flex items-center justify-between text-[11px] text-zinc-400 font-sans">
+                  <span className="font-semibold text-zinc-350">背景图像</span>
+                </div>
+                
+                <div className="flex flex-col gap-1.5">
+                  {bgType === 'custom' ? (
+                    <button
+                      onClick={() => setBgType('default')}
+                      className="w-full px-2 py-1.5 text-[10px] bg-zinc-900/40 hover:bg-zinc-800/40 border border-zinc-800/50 text-emerald-400 rounded-lg cursor-pointer flex items-center justify-center gap-1 font-sans transition-colors"
+                    >
+                      <span>✨ 恢复默认全息星云</span>
+                    </button>
+                  ) : null}
+
+                  {/* Custom Background Image uploader */}
+                  <label
+                    className={`px-2 py-1.5 text-[10px] font-sans text-left transition-all border rounded-lg cursor-pointer flex items-center justify-between group ${
+                      bgType === 'custom'
+                        ? 'bg-emerald-500/10 border-emerald-500/50 text-emerald-400 font-medium'
+                        : 'bg-zinc-900/30 border-zinc-850/40 text-zinc-400 hover:text-zinc-200'
+                    }`}
+                  >
+                    <span className="truncate flex items-center gap-1">
+                      📁 {customBgUrl ? '已载入自定义背景图' : '点击选择本地图片上传...'}
+                    </span>
+                    <input
+                      type="file"
+                      accept="image/*"
+                      className="hidden"
+                      onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        if (file) {
+                          const reader = new FileReader();
+                          reader.onload = (event) => {
+                            if (event.target?.result) {
+                              setCustomBgUrl(event.target.result as string);
+                              setBgType('custom');
+                            }
+                          };
+                          reader.readAsDataURL(file);
+                        }
+                      }}
+                    />
+                    {bgType === 'custom' && <div className="w-1 h-1 rounded-full bg-emerald-400 shrink-0 ml-1 font-sans" />}
+                  </label>
+                </div>
+              </div>
+
+              {/* ⚡ Human-centric Coexistence Mode Selection panel */}
+              <div className="flex flex-col gap-2 pt-2.5 border-t border-zinc-900/60">
+                <div className="flex items-center justify-between text-[11px] text-zinc-400 font-sans">
+                  <span className="font-semibold text-zinc-350">并存融合模式</span>
+                </div>
+                
+                <div className="grid grid-cols-2 gap-1.5">
+                  {[
+                    { id: 1, name: '双曝光 (Screen)', desc: '高亮发光并存(推荐)' },
+                    { id: 0, name: '柔和半透 (Mix)', desc: '经典半透明遮罩' },
+                    { id: 3, name: '戏剧柔光 (Soft)', desc: '艺术反差叠加' },
+                    { id: 2, name: '重叠暗色 (Mult)', desc: '暗色遮罩融合' }
+                  ].map((item) => {
+                    const isSel = blendMode === item.id;
+                    return (
+                      <button
+                        key={item.id}
+                        type="button"
+                        onClick={() => handleBlendModeChange(item.id)}
+                        className={`px-1.5 py-1 text-[9px] font-sans text-left transition-all border rounded-md cursor-pointer flex flex-col ${
+                          isSel
+                            ? 'bg-emerald-500/10 border-emerald-500/50 text-emerald-400'
+                            : 'bg-zinc-900/20 border-zinc-850/30 text-zinc-450 hover:text-zinc-200 hover:border-zinc-800'
+                        }`}
+                      >
+                        <span className="font-medium truncate">{item.name}</span>
+                        <span className="text-[7.5px] opacity-70 leading-none mt-0.5 scale-95 origin-left truncate">{item.desc}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Slider: Background Image Depth/Mix Strength */}
+              <div className="flex flex-col gap-1.5 pt-2.5 border-t border-zinc-900/60">
+                <div className="flex items-center justify-between text-[11px] text-zinc-400 font-sans">
+                  <span className="font-semibold text-zinc-350">背景深浅度</span>
+                  <span className="font-mono text-zinc-300">{Math.round(bgMix * 100)}%</span>
+                </div>
+                <input
+                  type="range"
+                  min="0.00"
+                  max="1.00"
+                  step="0.01"
+                  value={bgMix}
+                  onChange={(e) => handleBgMixChange(parseFloat(e.target.value))}
+                  className="w-full h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-emerald-400 focus:outline-none"
+                />
+                <div className="text-[9px] text-zinc-500 leading-normal">
+                  控制背景色调强浅。设置为 0% 时仅保留纯暗色
+                </div>
+              </div>
+
+              {/* Slider: Camera Image Depth/Mix Strength */}
+              <div className="flex flex-col gap-1.5 pt-2.5 border-t border-zinc-900/60">
+                <div className="flex items-center justify-between text-[11px] text-zinc-400 font-sans">
+                  <span className="font-semibold text-zinc-350">摄像头画面深浅度</span>
+                  <span className="font-mono text-zinc-300">{Math.round(cameraMix * 100)}%</span>
+                </div>
+                <input
+                  type="range"
+                  min="0.00"
+                  max="1.00"
+                  step="0.01"
+                  value={cameraMix}
+                  onChange={(e) => handleCameraMixChange(parseFloat(e.target.value))}
+                  className="w-full h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-emerald-400 focus:outline-none"
+                />
+                <div className="text-[9px] text-zinc-500 leading-normal">
+                  控制摄像头实况融合深浅。设置为 0% 时仅保留背景
+                </div>
+              </div>
+
               {/* Toggle 3: STRICT GESTURES ONLY */}
-              <label className="flex items-start gap-2 pt-1 border-t border-zinc-900/60 cursor-pointer group">
+              <label className="flex items-start gap-2 pt-2 border-t border-zinc-900/60 cursor-pointer group">
                 <input
                   type="checkbox"
                   checked={onlyHands}
