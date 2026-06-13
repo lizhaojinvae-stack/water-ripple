@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Volume2, VolumeX, Radio, Music, Sliders, Play, Pause } from 'lucide-react';
 import { ambientSynth } from '../utils/audio-synth';
 
@@ -10,7 +10,7 @@ interface AudioPanelProps {
 }
 
 export default function AudioPanel({ activeInteractionCount }: AudioPanelProps) {
-  const [isPlaying, setIsPlaying] = useState<boolean>(false);
+  const [isPlaying, setIsPlaying] = useState<boolean>(true);
   const [audioSource, setAudioSource] = useState<'synth' | 'piano' | 'custom'>('custom');
   const [volume, setVolume] = useState<number>(0.5);
   const [showSettings, setShowSettings] = useState<boolean>(false);
@@ -26,70 +26,83 @@ export default function AudioPanel({ activeInteractionCount }: AudioPanelProps) 
     }
   }, [activeInteractionCount, isPlaying, audioSource]);
 
-  // Handle Play/Pause toggling
-  const togglePlay = () => {
-    const nextPlayState = !isPlaying;
-    setIsPlaying(nextPlayState);
+  const stopAudio = useCallback(() => {
+    ambientSynth.pause();
+    if (audioRef.current) {
+      audioRef.current.pause();
+    }
+  }, []);
 
-    if (nextPlayState) {
-      if (audioSource === 'synth') {
-        ambientSynth.resume();
-        ambientSynth.setVolume(volume);
-        if (audioRef.current) {
-          audioRef.current.pause();
-        }
-      } else {
-        ambientSynth.pause();
-        const streamUrl = audioSource === 'piano' ? PIANO_STREAM_URL : bgMusicUrl;
-        
-        if (!audioRef.current || audioRef.current.src !== streamUrl) {
-          if (audioRef.current) {
-            audioRef.current.pause();
-          }
-          const audio = new Audio(streamUrl);
-          audio.loop = true;
-          audio.volume = volume * 0.35; // keep soft
-          audioRef.current = audio;
-        } else {
-          audioRef.current.volume = volume * 0.35;
-        }
-        
-        audioRef.current.play().catch((err) => {
-          console.warn('Audio play restricted by browser autoplay policy', err);
-        });
-      }
-    } else {
-      ambientSynth.pause();
+  const playCurrentSource = useCallback(async () => {
+    if (audioSource === 'synth') {
+      ambientSynth.resume();
+      ambientSynth.setVolume(volume);
       if (audioRef.current) {
         audioRef.current.pause();
       }
+      return;
     }
+
+    ambientSynth.pause();
+    const streamUrl = audioSource === 'piano' ? PIANO_STREAM_URL : bgMusicUrl;
+    const resolvedStreamUrl = new URL(streamUrl, window.location.href).href;
+
+    if (!audioRef.current || audioRef.current.src !== resolvedStreamUrl) {
+      if (audioRef.current) {
+        audioRef.current.pause();
+      }
+      const audio = new Audio(resolvedStreamUrl);
+      audio.loop = true;
+      audio.volume = volume * 0.35; // keep soft
+      audioRef.current = audio;
+    } else {
+      audioRef.current.volume = volume * 0.35;
+    }
+
+    try {
+      await audioRef.current.play();
+    } catch (err) {
+      console.warn('Audio play restricted by browser autoplay policy', err);
+    }
+  }, [audioSource, volume]);
+
+  useEffect(() => {
+    if (isPlaying) {
+      playCurrentSource();
+    } else {
+      stopAudio();
+    }
+  }, [isPlaying, playCurrentSource, stopAudio]);
+
+  useEffect(() => {
+    if (!isPlaying) return;
+
+    const unlockAudio = () => {
+      playCurrentSource();
+      window.removeEventListener('pointerdown', unlockAudio);
+      window.removeEventListener('keydown', unlockAudio);
+      window.removeEventListener('touchstart', unlockAudio);
+    };
+
+    window.addEventListener('pointerdown', unlockAudio, { once: true });
+    window.addEventListener('keydown', unlockAudio, { once: true });
+    window.addEventListener('touchstart', unlockAudio, { once: true });
+
+    return () => {
+      window.removeEventListener('pointerdown', unlockAudio);
+      window.removeEventListener('keydown', unlockAudio);
+      window.removeEventListener('touchstart', unlockAudio);
+    };
+  }, [isPlaying, playCurrentSource]);
+
+  // Handle Play/Pause toggling
+  const togglePlay = () => {
+    setIsPlaying((current) => !current);
   };
 
   // Switch between synthesis styles
   const handleSourceChange = (src: 'synth' | 'piano' | 'custom') => {
     setAudioSource(src);
-    if (!isPlaying) return;
-
-    if (src === 'synth') {
-      if (audioRef.current) audioRef.current.pause();
-      ambientSynth.resume();
-      ambientSynth.setVolume(volume);
-    } else {
-      ambientSynth.pause();
-      const streamUrl = src === 'piano' ? PIANO_STREAM_URL : bgMusicUrl;
-      
-      if (!audioRef.current || audioRef.current.src !== streamUrl) {
-        if (audioRef.current) {
-          audioRef.current.pause();
-        }
-        const audio = new Audio(streamUrl);
-        audio.loop = true;
-        audioRef.current = audio;
-      }
-      audioRef.current.volume = volume * 0.35;
-      audioRef.current.play().catch((err) => console.warn(err));
-    }
   };
 
   const handleVolumeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
